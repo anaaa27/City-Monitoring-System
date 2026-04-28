@@ -1,1 +1,3 @@
 1777153860 | User: ana | Role: manager | Action: ADD_REPORT
+1777355960 | User: ana | Role: inspector | Action: LIST_REPORTS
+1777356048 | User: ana | Role: inspector | Action: VIEW_REPORT

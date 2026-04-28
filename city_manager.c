@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 
 typedef struct {
@@ -128,7 +129,6 @@ void initialize_district_storage(const char *dist) {
 }
 
 
-
 void cmd_add_report(const char *dist, Role role, const char *user, const char *role_str) {
     char path[512];
     snprintf(path, 512, "%s/reports.dat", dist);
@@ -163,10 +163,43 @@ void cmd_add_report(const char *dist, Role role, const char *user, const char *r
     fgets(r.description, 100, stdin);
     r.description[strcspn(r.description, "\n")] = 0;
 
+    // Phase 1 Binary Write
     write(fd, &r, sizeof(Report));
     close(fd);
-    log_district_activity(dist, user, role_str, "ADD_REPORT");
-    printf("Report #%d added.\n", r.report_id);
+
+    /* ════════════════════════════════════════════════════════════
+       PHASE 2: NOTIFY MONITOR VIA SIGNAL
+       ════════════════════════════════════════════════════════════ */
+    int pid_fd = open(".monitor_pid", O_RDONLY);
+    char notify_status[128];
+
+    if (pid_fd < 0) {
+        // Error case: Monitor isn't running or file is missing
+        snprintf(notify_status, sizeof(notify_status), 
+                 "Monitor could not be informed (PID file missing)");
+    } else {
+        char pid_buf[16];
+        ssize_t bytes_read = read(pid_fd, pid_buf, sizeof(pid_buf) - 1);
+        close(pid_fd);
+
+        if (bytes_read > 0) {
+            pid_buf[bytes_read] = '\0';
+            pid_t monitor_pid = (pid_t)atoi(pid_buf);
+            if (kill(monitor_pid, SIGUSR1) == 0) {
+                snprintf(notify_status, sizeof(notify_status), 
+                         "Monitor (PID %d) notified successfully", monitor_pid);
+            } else {
+                snprintf(notify_status, sizeof(notify_status), 
+                         "Monitor could not be informed (Signal failed)");
+            }
+        } else {
+            snprintf(notify_status, sizeof(notify_status), 
+                     "Monitor could not be informed (Empty PID file)");
+        }
+    }
+    log_district_activity(dist, user, role_str, notify_status);
+    
+    printf("Report #%d added. %s\n", r.report_id, notify_status);
 }
 
 void cmd_list_reports(const char *dist, Role role, const char *user, const char *role_str) {
@@ -211,7 +244,6 @@ void cmd_view_report(const char *dist, Role role, const char *user, const char *
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) { perror("open"); return; }
-
     Report r;
     int found = 0;
     while (read(fd, &r, sizeof(Report)) == sizeof(Report)) {
@@ -349,6 +381,48 @@ void cmd_filter(const char *dist, Role role, const char *user, const char *role_
     log_district_activity(dist, user, role_str, "FILTER_REPORTS");
 }
 
+void cmd_remove_district(const char *dist, const char *role) {
+    if (strcmp(role, "manager") != 0) {
+        fprintf(stderr, "Only managers can remove districts.\n");
+        return;
+    }
+
+    char symlink_name[256];
+    sprintf(symlink_name, "active_reports-%s", dist);
+    unlink(symlink_name); 
+    pid_t pid = fork();
+    if (pid == 0) {
+        printf("[System] Child process %d deleting directory: %s\n", getpid(), dist);
+        char *args[] = {"rm", "-rf", (char *)dist, NULL};
+        execvp("rm", args);
+        exit(1);
+    } else {
+        wait(NULL);
+        printf("[System] District %s successfully removed.\n", dist);
+    }
+}
+
+void notify_monitor(const char *dist) {
+    int fd = open(".monitor_pid", O_RDONLY);
+    char log_msg[256];
+
+    if (fd >= 0) {
+        char pid_buf[10];
+        read(fd, pid_buf, 10);
+        pid_t monitor_pid = atoi(pid_buf);
+        close(fd);
+
+        if (kill(monitor_pid, SIGUSR1) == 0) {
+            sprintf(log_msg, "Monitor (PID %d) notified via SIGUSR1.", monitor_pid);
+        } else {
+            sprintf(log_msg, "Error: Could not send signal to Monitor.");
+        }
+    } else {
+        sprintf(log_msg, "Error: .monitor_pid not found. Monitor not informed.");
+    }
+    log_district_activity(dist, "SYSTEM", "city_manager", log_msg);
+    printf("%s\n", log_msg);
+}
 
 int main(int argc, char *argv[]) {
     Role role = ROLE_UNKNOWN;
